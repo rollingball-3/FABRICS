@@ -1,0 +1,126 @@
+# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+# Parameters for CS63 robot with Tesollo gripper fabric
+# Adapted from kuka_allegro_pose_params.yaml for force-based gripper control
+
+fabric_params:
+    cspace_attractor:
+        min_isotropic_mass: 1.0
+        max_isotropic_mass: 1.0
+        mass_sharpness: 20.0
+        mass_switch_offset: 1.
+        conical_sharpness: 20.
+        conical_gain: 1.
+    joint_limit_repulsion:
+        velocity_gate: True
+        breakaway_distance: 0.0
+        breakaway_velocity: 0.
+        soft_relu_gain: 8.
+        metric_scalar: 0.02
+        metric_exploder_offset: 0.1
+        max_metric: 100.
+        damping_gain: 8.
+    
+    # Force-based gripper control (replaces hand_attractor PCA control)
+    # These gains tune how the converted joint torques are applied
+    # gripper_force_attractor:
+    #     min_isotropic_mass: 1
+    #     max_isotropic_mass: 1
+    #     mass_sharpness: 20.
+    #     mass_switch_offset: 0.5
+    #     conical_sharpness: 30.
+    #     conical_gain: 40.
+    #     damping: 40.
+    #     damping_sharpness: 10.
+    #     damping_radius: 0.2
+    
+    palm_attractor:
+        min_isotropic_mass: 100.0
+        max_isotropic_mass: 100.0
+        mass_sharpness: 10
+        mass_switch_offset: 0.5
+        conical_sharpness: 50.0       # Increased from 40.0 for sharper response
+        conical_gain: 100.0           # Increased from 50.0 for stronger attraction
+        damping: 80.0                 # Increased from 50.0 for stability with higher gain
+        damping_sharpness: 10.
+        damping_radius: .2
+    
+    body_repulsion:
+      max_depth: 2.
+      min_depth: 0.01
+      engage_depth: 0.5
+      breakaway_depth: 0.0
+      breakaway_velocity: 0.
+      metric_scalar: 1.
+      velocity_gate: True
+      velocity_gate_sharpness: 1000.
+      velocity_gate_offset: 0.002
+      rescaled_min_dist: .01
+      forcing_metric_scalar: .01
+      geom_metric_scalar: .01
+      constant_accel: 1.
+      constant_accel_geom: 5.
+      damping_gain: 0.
+      
+      # Collision sphere frames - matched to CS63 + Tesollo URDF
+      # Note: delto_base_link and palm_link are virtual links (no geometry), excluded
+      collision_sphere_frames: 
+          # Arm collision spheres (CS63 arm links)
+          ["shoulder_link", "upperarm_link", "forearm_link",
+           "wrist_1_link", "wrist_2_link", "wrist_3_link",
+           # Finger 1 collision spheres
+           "F1_01", "F1_02", "F1_03", "F1_04",
+           # Finger 2 collision spheres
+           "F2_01", "F2_02", "F2_03", "F2_04",
+           # Finger 3 collision spheres
+           "F3_01", "F3_02", "F3_03", "F3_04"]
+      
+      # Collision sphere radii (meters) - one for each frame above (18 total)
+      collision_sphere_radii: [
+          0.08, 0.10, 0.08,        # shoulder, upperarm, forearm
+          0.05, 0.05, 0.04,        # wrist_1, wrist_2, wrist_3
+          0.015, 0.012, 0.012, 0.010,  # finger 1 (F1_01-F1_04)
+          0.015, 0.012, 0.012, 0.010,  # finger 2 (F2_01-F2_04)
+          0.015, 0.012, 0.012, 0.010   # finger 3 (F3_01-F3_04)
+      ]
+      
+      # Collision sphere pairs (leave empty to use prefix pairs)
+      collision_sphere_pairs: []
+      
+      # Collision link prefix pairs - defines which link groups should avoid each other
+      collision_link_prefix_pairs: [
+          # Avoid collision between each finger and the arm
+          ["F1_", "upperarm"],
+          ["F1_", "forearm"],
+          ["F2_", "upperarm"],
+          ["F2_", "forearm"],
+          ["F3_", "upperarm"],
+          ["F3_", "forearm"]
+      ]
+    
+    cspace_damping:
+      gain: 10.
+    
+    speed_control:
+      active: False
+      energy_target: 10.
+      damping: 100.
+    
+    # Joint limits for CS63 (6 arm) + Tesollo (12 gripper = 3 fingers × 4 joints)
+    joint_limits:
+      active: True
+      # Acceleration limits (rad/s^2) for [6 arm joints, 12 gripper joints]
+      acceleration: [
+          7.5, 7.5, 10., 10., 10., 20.,  # 6 arm joints (CS63)
+          22.5, 22.5, 22.5, 22.5,  # finger 1 (F1M1-F1M4)
+          22.5, 22.5, 22.5, 22.5,  # finger 2 (F2M1-F2M4)
+          22.5, 22.5, 22.5, 22.5   # finger 3 (F3M1-F3M4)
+      ]
+      # Jerk limits (rad/s^3) for [6 arm joints, 12 gripper joints]
+      jerk: [
+          3750., 3750., 5000., 5000., 5000., 10000.,  # 6 arm joints
+          2250., 2250., 2250., 2250.,  # finger 1
+          2250., 2250., 2250., 2250.,  # finger 2
+          2250., 2250., 2250., 2250.   # finger 3
+      ]
+
