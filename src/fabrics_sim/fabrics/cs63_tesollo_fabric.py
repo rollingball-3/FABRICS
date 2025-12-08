@@ -23,7 +23,7 @@ from fabrics_sim.taskmaps.lower_joint_limit import LowerJointLimitMap
 from fabrics_sim.taskmaps.linear_taskmap import LinearMap
 from fabrics_sim.energy.euclidean_energy import EuclideanEnergy
 from fabrics_sim.taskmaps.robot_frame_origins_taskmap import RobotFrameOriginsTaskMap
-from fabrics_sim.taskmaps.robot_frame_pose_taskmap import RobotFramePoseTaskMap
+from fabrics_sim.taskmaps.gripper_only_taskmap import GripperOnlyTaskMap
 from fabrics_sim.utils.path_utils import get_robot_urdf_path
 from fabrics_sim.utils.rotation_utils import euler_to_matrix, matrix_to_euler
 from fabrics_sim.utils.rotation_utils import quaternion_to_matrix, matrix_to_quaternion
@@ -37,6 +37,12 @@ class CS63TesolloFabric(BaseFabric):
     - Forces are converted to joint torques via Jacobian transpose: τ = J^T * F
     - Direct joint control for gripper (no PCA dimensionality reduction)
     - Includes palm pose control, joint limiting, and collision avoidance
+    
+    Force Isolation Design:
+    - Uses GripperOnlyTaskMap for fingertip control, which masks arm DOF columns in Jacobian
+    - This ensures fingertip forces ONLY affect gripper joints, preventing unwanted arm motion
+    - Palm attractor (separate fabric term) controls arm motion independently
+    - Result: Clean separation between arm control (palm pose) and gripper control (fingertip forces)
     """
     def __init__(self, batch_size, device, timestep, num_arm_joints=6, num_gripper_joints=12, 
                  num_fingers=3, graph_capturable=True):
@@ -68,6 +74,11 @@ class CS63TesolloFabric(BaseFabric):
         robot_name = "cs63_tesollo"      # Update this to match your robot name
         self.urdf_path = get_robot_urdf_path(robot_dir_name, robot_name)
         
+        gripper_dir_name = "DG3F/urdf"
+        gripper_name = "delto_gripper_3f"
+        self.gripper_urdf_path = get_robot_urdf_path(gripper_dir_name, gripper_name)
+        # Directly use DG3F gripper URDF path for gripper-only taskmap
+        
         self.load_robot(robot_dir_name, robot_name, batch_size)
         
         # Load default configuration from YAML file
@@ -77,15 +88,15 @@ class CS63TesolloFabric(BaseFabric):
         self.construct_fabric()
         
         # Allocate target tensors
-        # Palm pose target: (b x 6) -> 3 for position + 3 for Euler ZYX angles (input format)
-        # Only position will be used for control, orientation is ignored
-        self._palm_pose_target = torch.zeros(batch_size, 6, device=device)
+        # Palm pose target: (b x 12) -> 3 for position + 9 for rotation matrix (row-major)
+        self._palm_pose_target = torch.zeros(batch_size, 12, device=device)
+        # Separate storage for palm position and rotation matrix to avoid confusion
+        self._palm_position = torch.zeros(batch_size, 3, device=device)
+        self._palm_rotation_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
         
         # Finger force targets: (b x num_fingers x 3) for 3D forces on each fingertip
+        # These will be converted to external_force in fingertip space (b x 9)
         self._finger_forces = torch.zeros(batch_size, num_fingers, 3, device=device)
-        
-        # Converted joint torques from finger forces: (b x num_gripper_joints)
-        self._gripper_joint_torques = torch.zeros(batch_size, num_gripper_joints, device=device)
 
     def add_joint_limit_repulsion(self):
         """
@@ -154,43 +165,35 @@ class CS63TesolloFabric(BaseFabric):
     
     def add_gripper_force_fabric(self):
         """
-        Add force-based control for gripper joints using Jacobian transpose.
+        Add force-based control for gripper joints using external_force mechanism.
         
-        Creates fingertip taskmaps where forces at fingertips are pulled back
-        to gripper joint torques via: τ = J^T * F
+        Uses GripperOnlyTaskMap to ensure fingertip forces ONLY affect gripper joints.
+        The Jacobian columns for arm joints are masked to zero, preventing force coupling.
         
-        Only considers:
-        - Position Jacobian (3 x num_joints), not orientation/torque
-        - Gripper joints only (not arm joints)
+        Design: fingertip forces are passed as external_force, which gets pulled back
+        to joint space via J^T: fπ(a) = γ * J^T(qf) * clamp(a, -1, 1)
         
-        Reference: fπ(a) = γ * J^T(qf) * clamp(a, -1, 1)
+        No fabric term needed - external_force is automatically added to potential_force
+        in the taskmap container, then pulled back via J^T.
         """
         # Fingertip frame names from URDF (3-finger Tesollo gripper)
-        self._fingertip_frames = ["F1_TIP", "F2_TIP", "F3_TIP"]
+        self._fingertip_frames = ["tip1_force_frame", "tip2_force_frame", "tip3_force_frame"]
         
-        # Create taskmap for all fingertips (position only, not orientation)
-        # RobotFrameOriginsTaskMap returns position and position Jacobian
+        # Create taskmap for all fingertips with GRIPPER-ONLY Jacobian
+        # This taskmap zeros out arm columns in the Jacobian, so forces only
+        # affect gripper joints and do NOT propagate to arm joints
         taskmap_name = "fingertips"
-        taskmap = RobotFrameOriginsTaskMap(
-            self.urdf_path, 
+        taskmap = GripperOnlyTaskMap(
+            self.gripper_urdf_path,  # Use DG3F gripper URDF directly
             self._fingertip_frames,
             self.batch_size, 
-            self.device
+            self.device,
+            num_arm_joints=self.num_arm_joints,
+            num_gripper_joints=self.num_gripper_joints
         )
         self.add_taskmap(taskmap_name, taskmap, graph_capturable=self.graph_capturable)
-
-        # Create a forcing attractor in fingertip space
-        # Forces applied here will be pulled back to joint space via J^T
-        fabric_name = "fingertip_force_attractor"
-        is_forcing = True
-        fabric = Attractor(
-            is_forcing, 
-            self.fabric_params['gripper_force_attractor'],
-            self.device, 
-            graph_capturable=self.graph_capturable
-        )
         
-        self.add_fabric(taskmap_name, fabric_name, fabric)
+        # external_force will be set in set_features() and pulled back via J^T
     
     def add_palm_pose_attractor(self):
         """
@@ -202,15 +205,22 @@ class CS63TesolloFabric(BaseFabric):
         """
         # Set name for taskmap, create it, and add to pool of taskmaps
         taskmap_name = "palm"
+        # Use multiple points (origin + +/-x, +/-y, +/-z) like Kuka demo for orientation control
+        control_point_frames = [
+            "palm_link",
+            "palm_x", "palm_x_neg",
+            "palm_y", "palm_y_neg",
+            "palm_z", "palm_z_neg",
+        ]
         taskmap = RobotFrameOriginsTaskMap(
-            self.urdf_path, 
-            ["palm_link"],  # Single frame for palm origin position
-            self.batch_size, 
-            self.device
+            self.urdf_path,
+            control_point_frames,
+            self.batch_size,
+            self.device,
         )
         self.add_taskmap(taskmap_name, taskmap, graph_capturable=self.graph_capturable)
             
-        # Create forcing attractor for 3D position tracking
+        # Create forcing attractor in 3D point space (origin + axis points)
         fabric_name = "palm_attractor"
         is_forcing = True
         fabric = Attractor(is_forcing, self.fabric_params['palm_attractor'],
@@ -302,14 +312,16 @@ class CS63TesolloFabric(BaseFabric):
     def construct_fabric(self):
         """
         Construct the fabric by adding the various geometric, potential, and energy components.
+        Enable/disable flags are read from config file instead of hardcoded.
         """
-        # Progressive testing flags - set to True to enable each module
-        self.use_cspace_attractor = True  # Disabled - only use palm attractor
-        self.use_joint_limits = True
-        self.use_gripper_force = False
-        self.use_palm_pose = True
-        self.use_collision_avoidance = False
-        self.use_energy = True  # Required: provides base metric to prevent singularity
+        # Read enable/disable flags from config file
+        active_flags = self.fabric_params.get('active_flags', {})
+        self.use_cspace_attractor = active_flags.get('cspace_attractor')
+        self.use_joint_limits = active_flags.get('joint_limit_repulsion')
+        self.use_gripper_force = active_flags.get('gripper_force')
+        self.use_palm_pose = active_flags.get('palm_attractor')
+        self.use_collision_avoidance = active_flags.get('body_repulsion')
+        self.use_energy = active_flags.get('cspace_energy')
         
         if self.use_cspace_attractor:
             self.add_cspace_attractor(False)
@@ -331,169 +343,68 @@ class CS63TesolloFabric(BaseFabric):
     
     def get_palm_pose_target(self):
         """
-        Returns the palm pose target (6D: position + orientation).
+        Returns the palm pose target (position + rotation matrix).
         
         Returns:
-            palm_target: (b x 6) tensor, [x, y, z, euler_z, euler_y, euler_x]
+            palm_target: (b x 12) tensor, [x, y, z, R_flattened_row_major]
         """
         return self._palm_pose_target
     
     def convert_transform_to_points(self):
         """
         Converts palm pose target to collection of target points.
-        
-        Currently returns only the origin point (palm position).
-        Can be extended to include additional points along axes for orientation control
-        (similar to Kuka demo which uses 7 points: origin + 6 axis points).
-        
-        Returns:
-            palm_targets: (b x 3*n) tensor, where n is number of points
-                         Currently n=1 (only origin), so returns (b x 3)
-        
-        Extension Guide (to add orientation control via multiple points):
-        ----------------------------------------------------------------
-        1. Extract orientation from self._palm_pose_target[:, 3:6] (Euler ZYX)
-        2. Convert to rotation matrix: R = euler_to_matrix(euler)
-        3. Build 4x4 transform: palm_transform = [[R, pos], [0, 1]]
-        4. Define offset points in palm frame (like Kuka demo):
-           - x_point = [0.25, 0, 0, 1], x_neg_point = [-0.25, 0, 0, 1]
-           - y_point = [0, 0.25, 0, 1], y_neg_point = [0, -0.25, 0, 1]
-           - z_point = [0, 0, 0.25, 1], z_neg_point = [0, 0, -0.25, 1]
-        5. Transform to world frame: world_point = palm_transform @ point
-        6. Stack all points: [origin, x_point, x_neg, y_point, y_neg, z_point, z_neg]
-        7. Update palm_targets size to (b x 7*3 = b x 21)
-        8. Update RobotFrameOriginsTaskMap frames in add_palm_pose_attractor()
-           to match ["palm_link", "palm_x", "palm_x_neg", "palm_y", "palm_y_neg", 
-                     "palm_z", "palm_z_neg"] (requires URDF update)
-        
-        See kuka_allegro_pose_fabric.py:320-373 for reference implementation.
+        Returns 7 points in world frame:
+        origin + +/-x, +/-y, +/-z directions of the palm.
         """
-        # ============ Current Implementation: Single Point (Origin Only) ============
-        palm_targets = torch.zeros(self.batch_size, 1 * 3, device=self.device)
-        
-        # Origin point (palm position from pose target)
-        palm_targets[:, :3] = self._palm_pose_target[:, :3]
-        
+        # Build 4x4 transformation matrix from stored palm pose
+        palm_transform = torch.zeros(self.batch_size, 4, 4, device=self.device)
+        palm_transform[:, 3, 3] = 1.0
+        rotation_matrix = self._palm_rotation_matrix
+        palm_transform[:, :3, :3] = rotation_matrix
+        palm_transform[:, :3, 3] = self._palm_position
+
+        # Define offset points in palm frame (homogeneous coordinates)
+        offset_distance = 0.25
+        x_point = torch.zeros(self.batch_size, 4, device=self.device)
+        x_point[:, 3] = 1.0
+        x_point[:, 0] = offset_distance
+
+        x_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
+        x_neg_point[:, 3] = 1.0
+        x_neg_point[:, 0] = -offset_distance
+
+        y_point = torch.zeros(self.batch_size, 4, device=self.device)
+        y_point[:, 3] = 1.0
+        y_point[:, 1] = offset_distance
+
+        y_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
+        y_neg_point[:, 3] = 1.0
+        y_neg_point[:, 1] = -offset_distance
+
+        z_point = torch.zeros(self.batch_size, 4, device=self.device)
+        z_point[:, 3] = 1.0
+        z_point[:, 2] = offset_distance
+
+        z_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
+        z_neg_point[:, 3] = 1.0
+        z_neg_point[:, 2] = -offset_distance
+
+        # Allocate space for 7 points (origin + 6 axis points)
+        palm_targets = torch.zeros(self.batch_size, 7 * 3, device=self.device)
+
+        # Origin
+        palm_targets[:, :3] = self._palm_position
+
+        # Transform and stack axis points
+        palm_targets[:, 3:6] = torch.bmm(palm_transform, x_point.unsqueeze(2)).squeeze(2)[:, :3]
+        palm_targets[:, 6:9] = torch.bmm(palm_transform, x_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
+        palm_targets[:, 9:12] = torch.bmm(palm_transform, y_point.unsqueeze(2)).squeeze(2)[:, :3]
+        palm_targets[:, 12:15] = torch.bmm(palm_transform, y_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
+        palm_targets[:, 15:18] = torch.bmm(palm_transform, z_point.unsqueeze(2)).squeeze(2)[:, :3]
+        palm_targets[:, 18:21] = torch.bmm(palm_transform, z_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
+
         return palm_targets
-        
-        # ============ Future Multi-Point Implementation Template ============
-        # Uncomment and modify below to enable orientation control via multiple points
-        #
-        # from fabrics_sim.utils.rotation_utils import euler_to_matrix
-        # 
-        # # Build 4x4 transformation matrix from pose target
-        # palm_transform = torch.zeros(self.batch_size, 4, 4, device=self.device)
-        # palm_transform[:, 3, 3] = 1.
-        # 
-        # # Extract and convert orientation (Euler ZYX -> rotation matrix)
-        # euler = self._palm_pose_target[:, 3:6]
-        # rotation_matrix = euler_to_matrix(euler)
-        # palm_transform[:, :3, :3] = rotation_matrix.transpose(1, 2)
-        # palm_transform[:, :3, 3] = self._palm_pose_target[:, :3]
-        # 
-        # # Define offset points in palm frame (homogeneous coordinates)
-        # offset_distance = 0.15  # meters (adjust based on palm size)
-        # x_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # x_point[:, 3] = 1.; x_point[:, 0] = offset_distance
-        # x_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # x_neg_point[:, 3] = 1.; x_neg_point[:, 0] = -offset_distance
-        # 
-        # y_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # y_point[:, 3] = 1.; y_point[:, 1] = offset_distance
-        # y_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # y_neg_point[:, 3] = 1.; y_neg_point[:, 1] = -offset_distance
-        # 
-        # z_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # z_point[:, 3] = 1.; z_point[:, 2] = offset_distance
-        # z_neg_point = torch.zeros(self.batch_size, 4, device=self.device)
-        # z_neg_point[:, 3] = 1.; z_neg_point[:, 2] = -offset_distance
-        # 
-        # # Allocate space for 7 points (origin + 6 axis points)
-        # palm_targets = torch.zeros(self.batch_size, 7 * 3, device=self.device)
-        # 
-        # # Origin
-        # palm_targets[:, :3] = self._palm_pose_target[:, :3]
-        # 
-        # # Transform and stack axis points
-        # palm_targets[:, 3:6] = torch.bmm(palm_transform, x_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # palm_targets[:, 6:9] = torch.bmm(palm_transform, x_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # palm_targets[:, 9:12] = torch.bmm(palm_transform, y_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # palm_targets[:, 12:15] = torch.bmm(palm_transform, y_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # palm_targets[:, 15:18] = torch.bmm(palm_transform, z_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # palm_targets[:, 18:21] = torch.bmm(palm_transform, z_neg_point.unsqueeze(2)).squeeze(2)[:, :3]
-        # 
-        # return palm_targets
     
-    def compute_fingertip_jacobians(self, batched_cspace_position):
-        """
-        Compute the Jacobian matrices for each fingertip.
-        
-        This computes J where: v_fingertip = J * qd (velocity relationship)
-        For force mapping we use: τ = J^T * F (transpose for force-to-torque)
-        
-        Args:
-            batched_cspace_position: bxN tensor of joint positions
-            
-        Returns:
-            jacobians: list of (b x 3 x num_gripper_joints) tensors, one per finger
-        """
-        # Create taskmap for each fingertip to get its Jacobian
-        jacobians = []
-        
-        for finger_idx, frame_name in enumerate(self._fingertip_frames):
-            # Create a temporary taskmap for this fingertip
-            taskmap = RobotFrameOriginsTaskMap(self.urdf_path, [frame_name],
-                                              self.batch_size, self.device)
-            
-            # Compute position and Jacobian
-            # pos: (b x 3), jac: (b x 3 x num_joints)
-            pos, jac = taskmap(batched_cspace_position, None)
-            
-            # Extract only the gripper joint columns from the Jacobian
-            # jac shape: (b x 3 x num_joints) -> extract columns corresponding to gripper
-            jac_gripper = jac[:, :, self.num_arm_joints:self.num_arm_joints + self.num_gripper_joints]
-            
-            jacobians.append(jac_gripper)
-        
-        return jacobians
-    
-    def convert_finger_forces_to_joint_torques(self, finger_forces, batched_cspace_position):
-        """
-        Convert fingertip forces to gripper joint torques using Jacobian transpose.
-        
-        Formula: τ = J^T * F
-        
-        Args:
-            finger_forces: (b x num_fingers x 3) tensor of forces at each fingertip
-            batched_cspace_position: (b x num_joints) tensor of current joint positions
-            
-        Returns:
-            joint_torques: (b x num_gripper_joints) tensor of joint torques
-        """
-        # Compute Jacobians for all fingertips
-        jacobians = self.compute_fingertip_jacobians(batched_cspace_position)
-        
-        # Initialize joint torques
-        joint_torques = torch.zeros(self.batch_size, self.num_gripper_joints, device=self.device)
-        
-        # For each finger, compute τ_i = J_i^T * F_i and accumulate
-        for finger_idx in range(self.num_fingers):
-            # Get Jacobian for this finger: (b x 3 x num_gripper_joints)
-            J = jacobians[finger_idx]
-            
-            # Get force for this finger: (b x 3)
-            F = finger_forces[:, finger_idx, :]
-            
-            # Compute τ = J^T * F
-            # J^T shape: (b x num_gripper_joints x 3)
-            # F shape: (b x 3 x 1)
-            # Result: (b x num_gripper_joints)
-            tau = torch.bmm(J.transpose(1, 2), F.unsqueeze(2)).squeeze(2)
-            
-            # Accumulate torques (in case multiple fingers affect same joints)
-            joint_torques += tau
-        
-        return joint_torques
     
     def get_sphere_radii(self):
         """
@@ -532,29 +443,30 @@ class CS63TesolloFabric(BaseFabric):
         palm_position, _ = self.get_taskmap("palm")(cspace_position, None)
         return palm_position
 
-    def set_features(self, finger_forces, palm_pose_target, orientation_convention,
+    def set_features(self, finger_forces, palm_position, palm_matrix,
                      batched_cspace_position, batched_cspace_velocity,
                      object_ids, object_indicator,
-                     cspace_damping_gain=None):
+                     cspace_damping_gain=None, force_scale=None):
         """
         Passes the input features to the various fabric terms.
         
-        KEY DIFFERENCE: Instead of hand PCA targets, this takes fingertip forces!
+        KEY DESIGN: Uses external_force mechanism for fingertip forces.
+        Forces are clamped, scaled, and passed as external_force, which gets
+        pulled back via J^T: fπ(a) = γ * J^T(qf) * clamp(a, -1, 1)
         
         Args:
-            finger_forces: (b x num_fingers x 3) tensor of forces at each fingertip in world frame
-            palm_pose_target: (b x m) tensor (position + rotation), where rotation
-                            can have 3 elements for Euler "ZYX" angles or
-                            4 elements for quaternion (x, y, z, w)
-                            NOTE: Currently only position (first 3 elements) is used for control
-            orientation_convention: str, either "euler_zyx" or "quaternion" (x, y, z, w)
-            batched_cspace_position: (b x num_joints) tensor, current fabric position
-            batched_cspace_velocity: (b x num_joints) tensor, current fabric velocity
-            object_ids: 2D int Warp array referencing object meshes
+            finger_forces: (b x num_fingers x 3) tensor of RL actions/forces at each fingertip.
+                           Will be clamped to [-1, 1] and scaled by force_scale.
+            palm_position: (b x 3) tensor, palm position in base/world frame used by the fabric.
+            palm_matrix: (b x 3 x 3) tensor, rotation matrix of the palm (row-major).
+            batched_cspace_position: (b x num_joints) tensor, current fabric position.
+            batched_cspace_velocity: (b x num_joints) tensor, current fabric velocity.
+            object_ids: 2D int Warp array referencing object meshes.
             object_indicator: 2D Warp array of type uint64, indicating the presence
-                            of a Warp mesh in object_ids at corresponding index
-                            0=no mesh, 1=mesh
-            cspace_damping_gain: optional override for damping gain
+                              of a Warp mesh in object_ids at corresponding index
+                              0=no mesh, 1=mesh.
+            cspace_damping_gain: optional override for damping gain.
+            force_scale: optional scaling factor γ (default from config or 1.0).
         """
         # Only set cspace attractor if enabled
         if self.use_cspace_attractor:
@@ -562,40 +474,46 @@ class CS63TesolloFabric(BaseFabric):
         
         # Only set gripper force features if enabled
         if self.use_gripper_force:
-            fingertip_pos, fingertip_jac = self.get_taskmap("fingertips")(
-                batched_cspace_position, None
-            )
+            # Store finger forces
+            if finger_forces is not None:
+                self._finger_forces.copy_(finger_forces)
+        
+            gripper_params = self.fabric_params.get("gripper_force", {})
+            self._force_scale = gripper_params.get("fingertip_force_scale", 1.0)
+        
+            # Process forces: clamp to [-1, 1] and scale
+            # finger_forces shape: (b x num_fingers x 3)
+            forces_clamped = torch.clamp(self._finger_forces, min=-1.0, max=1.0)
             
-            gripper_jac = fingertip_jac[:, :, self.num_arm_joints:self.num_arm_joints + self.num_gripper_joints]
-            forces_flat = finger_forces.reshape(self.batch_size, -1)
+            # Flatten to fingertip space: (b x num_fingers x 3) -> (b x 9)
+            forces_flat = forces_clamped.reshape(self.batch_size, -1)
             
-            self._gripper_joint_torques = torch.bmm(
-                gripper_jac.transpose(1, 2), 
-                forces_flat.unsqueeze(2)
-            ).squeeze(2)
+            # Scale by γ
+            forces_scaled = self._force_scale * forces_flat
             
-            force_scale = self.fabric_params.get('fingertip_force_scale', 0.1)
-            fingertip_target = fingertip_pos + force_scale * forces_flat
-            self.fabrics_features["fingertips"]["fingertip_force_attractor"] = fingertip_target
+            # Set as external_force in fingertip space
+            # This will be automatically pulled back via J^T in eval_natural()
+            # Since GripperOnlyTaskMap zeros arm columns, only gripper joints are affected
+            self.external_forces["fingertips"] = forces_scaled
+        else:
+            # Clear external_force if gripper force is disabled
+            self.external_forces["fingertips"] = None
         
         # Only set palm pose features if enabled
         if self.use_palm_pose:
-            # Store the full pose target (for API compatibility with Kuka demo)
-            if orientation_convention == "euler_zyx":
-                assert(palm_pose_target.shape[1] == 6), \
-                    "Pose target must be of dimensions (batch_size x 6) with Euler convention"
-                self._palm_pose_target.copy_(palm_pose_target)
-            elif orientation_convention == "quaternion":
-                assert(palm_pose_target.shape[1] == 7), \
-                    "Pose target must be of dimensions (batch_size x 7) with quaternion convention"
-                position = palm_pose_target[:, :3]
-                quaternion_xyzw = palm_pose_target[:, 3:7]
-                rotation_matrix = quaternion_to_matrix(quaternion_xyzw[:, [3, 0, 1, 2]])
-                euler = matrix_to_euler(rotation_matrix)
-                self._palm_pose_target[:, :3] = position
-                self._palm_pose_target[:, 3:] = euler
-            else:
-                raise ValueError('orientation_convention parameter must be either "euler_zyx" or "quaternion"')
+            assert palm_position is not None and palm_matrix is not None, \
+                "palm_position and palm_matrix must both be provided when palm pose control is enabled"
+            assert palm_position.shape[1] == 3, \
+                "palm_position must have shape (batch_size x 3)"
+            assert palm_matrix.shape[1:] == (3, 3), \
+                "palm_matrix must have shape (batch_size x 3 x 3)"
+
+            # Store separate palm position and rotation matrix
+            self._palm_position.copy_(palm_position)
+            self._palm_rotation_matrix.copy_(palm_matrix)
+            # Maintain combined pose target tensor for compatibility
+            self._palm_pose_target[:, :3] = self._palm_position
+            self._palm_pose_target[:, 3:] = self._palm_rotation_matrix.reshape(self.batch_size, 9)
             
             # Convert pose target to collection of points (similar to Kuka demo)
             # Currently returns only origin point, can be extended to multiple points

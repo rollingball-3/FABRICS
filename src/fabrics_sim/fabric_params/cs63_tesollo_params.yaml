@@ -4,6 +4,17 @@
 # Adapted from kuka_allegro_pose_params.yaml for force-based gripper control
 
 fabric_params:
+    # Enable/disable flags for fabric components
+    # Set to True to enable, False to disable
+    active_flags:
+        cspace_attractor: True
+        joint_limit_repulsion: True
+        gripper_force: True
+        palm_attractor: True
+        #TODO 碰撞的配置需要进一步考究，目前已经将urdf转换为cs63_tesollo_spherized.urdf
+        body_repulsion: False
+        cspace_energy: True
+    
     cspace_attractor:
         min_isotropic_mass: 1.0
         max_isotropic_mass: 1.0
@@ -21,22 +32,13 @@ fabric_params:
         max_metric: 100.
         damping_gain: 8.
     
-    # Force-based gripper control (replaces hand_attractor PCA control)
-    # These gains tune how the converted joint torques are applied
-    # gripper_force_attractor:
-    #     min_isotropic_mass: 1
-    #     max_isotropic_mass: 1
-    #     mass_sharpness: 20.
-    #     mass_switch_offset: 0.5
-    #     conical_sharpness: 30.
-    #     conical_gain: 40.
-    #     damping: 40.
-    #     damping_sharpness: 10.
-    #     damping_radius: 0.2
+    # Force-based gripper control
+    gripper_force:
+        fingertip_force_scale: 50
     
     palm_attractor:
-        min_isotropic_mass: 100.0
-        max_isotropic_mass: 100.0
+        min_isotropic_mass: 10.0
+        max_isotropic_mass: 10.0
         mass_sharpness: 10
         mass_switch_offset: 0.5
         conical_sharpness: 50.0       # Increased from 40.0 for sharper response
