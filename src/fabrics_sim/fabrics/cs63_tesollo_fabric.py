@@ -44,8 +44,9 @@ class CS63TesolloFabric(BaseFabric):
     - Palm attractor (separate fabric term) controls arm motion independently
     - Result: Clean separation between arm control (palm pose) and gripper control (fingertip forces)
     """
-    def __init__(self, batch_size, device, timestep, num_arm_joints=6, num_gripper_joints=12, 
-                 num_fingers=3, graph_capturable=True):
+    def __init__(self, batch_size, device, timestep, default_joint_config,
+                 num_arm_joints=6, num_gripper_joints=12, num_fingers=3, 
+                 graph_capturable=True):
         """
         Constructor. Specifies parameter file and constructs the fabric.
         
@@ -53,6 +54,10 @@ class CS63TesolloFabric(BaseFabric):
             batch_size: size of the batch
             device: str that sets the device for the fabric
             timestep: control timestep
+            default_joint_config: REQUIRED. Initial joint configuration for cspace attractor.
+                                 Can be torch.Tensor, list, or numpy.ndarray.
+                                 Shape: (num_arm_joints + num_gripper_joints,) or 
+                                       (batch_size, num_arm_joints + num_gripper_joints)
             num_arm_joints: number of arm joints (default: 6)
             num_gripper_joints: number of gripper joints (default: 12 for 3-finger gripper)
             num_fingers: number of fingers (default: 3)
@@ -68,6 +73,7 @@ class CS63TesolloFabric(BaseFabric):
         self.num_gripper_joints = num_gripper_joints
         self.num_fingers = num_fingers
         self.joints_per_finger = num_gripper_joints // num_fingers
+        total_joints = num_arm_joints + num_gripper_joints
         
         # URDF filepath - you may need to adjust this based on your robot
         robot_dir_name = "cs63_tesollo"  # Update this to match your robot directory
@@ -81,8 +87,28 @@ class CS63TesolloFabric(BaseFabric):
         
         self.load_robot(robot_dir_name, robot_name, batch_size)
         
-        # Load default configuration from YAML file
-        self.default_config = self._load_initial_joint_config()
+        # Process and validate default_joint_config (REQUIRED parameter)
+        if isinstance(default_joint_config, torch.Tensor):
+            config_tensor = default_joint_config.to(device)
+        else:
+            # Convert from list/numpy array
+            config_tensor = torch.tensor(default_joint_config, device=device, dtype=torch.float32)
+        
+        # Handle different input shapes
+        if config_tensor.dim() == 1:
+            # Shape: (num_joints,) -> expand to (batch_size, num_joints)
+            assert config_tensor.shape[0] == total_joints, \
+                f"Expected {total_joints} joints, got {config_tensor.shape[0]}"
+            self.default_config = config_tensor.unsqueeze(0).repeat(batch_size, 1)
+        elif config_tensor.dim() == 2:
+            # Shape: (batch_size, num_joints) -> use directly
+            assert config_tensor.shape[0] == batch_size, \
+                f"Batch size mismatch: expected {batch_size}, got {config_tensor.shape[0]}"
+            assert config_tensor.shape[1] == total_joints, \
+                f"Expected {total_joints} joints, got {config_tensor.shape[1]}"
+            self.default_config = config_tensor
+        else:
+            raise ValueError(f"default_joint_config must be 1D or 2D, got shape {config_tensor.shape}")
         
         # Construct the fabric
         self.construct_fabric()
@@ -538,59 +564,5 @@ class CS63TesolloFabric(BaseFabric):
         if cspace_damping_gain is not None:
             self.fabric_params['cspace_damping']['gain'] = cspace_damping_gain
 
-    def _load_initial_joint_config(self):
-        """
-        Load initial joint configuration from YAML file.
-        Uses the same configuration as Genesis manipulation examples.
-        
-        Returns:
-            torch.Tensor: Initial joint configuration [batch_size, 18]
-                         (6 arm joints + 12 gripper joints)
-        """
-        # Path to the config file in Genesis examples
-        genesis_root = Path(__file__).parent.parent.parent.parent.parent.parent
-        config_path = genesis_root / "examples" / "manipulation" / "initial_joint_config.yaml"
-        
-        # Fallback: try relative path if absolute path doesn't work
-        if not config_path.exists():
-            config_path = Path("examples/manipulation/initial_joint_config.yaml")
-        
-        if not config_path.exists():
-            # If config file not found, use hardcoded values as fallback
-            print(f"Warning: Config file not found at {config_path}, using hardcoded defaults")
-            default_config = torch.tensor([
-                0.0, -1.5707963267948966, -1.5707963267948966, 0.0, 1.5707963267948966, 0.7853981633974483,  # arm
-                0.0, 0.0, 0.7853981633974483, 0.5235987755982988,  # finger 1
-                -0.4363323129985824, 0.0, 0.7853981633974483, 0.5235987755982988,  # finger 2
-                0.4363323129985824, 0.0, 0.7853981633974483, 0.5235987755982988   # finger 3
-            ], device=self.device)
-            return default_config.unsqueeze(0).repeat(self.batch_size, 1)
-        
-        # Load YAML file
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Parse arm joints in order
-        arm_joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
-        arm_positions = [config["arm_joints"][name] for name in arm_joint_names]
-        
-        # Parse gripper joints in order
-        gripper_joint_names = [
-            "F1M1", "F1M2", "F1M3", "F1M4",
-            "F2M1", "F2M2", "F2M3", "F2M4",
-            "F3M1", "F3M2", "F3M3", "F3M4"
-        ]
-        gripper_positions = [config["gripper_joints"][name] for name in gripper_joint_names]
-        
-        # Combine into single tensor
-        all_positions = arm_positions + gripper_positions
-        # # for cspace test
-        # all_positions[0] += 0.2
-        # all_positions[1] -= 0.2
-        default_config = torch.tensor(all_positions, device=self.device, dtype=torch.float32)
-        
-        return default_config.unsqueeze(0).repeat(self.batch_size, 1)
+
 
