@@ -390,7 +390,7 @@ class CS63TesolloFabric(BaseFabric):
         palm_transform[:, :3, 3] = self._palm_position
 
         # Define offset points in palm frame (homogeneous coordinates)
-        offset_distance = 0.25
+        offset_distance = 0.1
         x_point = torch.zeros(self.batch_size, 4, device=self.device)
         x_point[:, 3] = 1.0
         x_point[:, 0] = offset_distance
