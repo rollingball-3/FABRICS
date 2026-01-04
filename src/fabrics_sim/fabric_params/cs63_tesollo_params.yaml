@@ -101,7 +101,7 @@ fabric_params:
       ]
     
     cspace_damping:
-      gain: 10.
+      gain: 5.
     
     speed_control:
       active: False

@@ -27,6 +27,7 @@ from fabrics_sim.taskmaps.gripper_only_taskmap import GripperOnlyTaskMap
 from fabrics_sim.utils.path_utils import get_robot_urdf_path
 from fabrics_sim.utils.rotation_utils import euler_to_matrix, matrix_to_euler
 from fabrics_sim.utils.rotation_utils import quaternion_to_matrix, matrix_to_quaternion
+from fabrics_sim.taskmaps.robot_frame_origins_taskmap import RobotKinematics
 
 class CS63TesolloFabric(BaseFabric):
     """
@@ -220,6 +221,55 @@ class CS63TesolloFabric(BaseFabric):
         self.add_taskmap(taskmap_name, taskmap, graph_capturable=self.graph_capturable)
         
         # external_force will be set in set_features() and pulled back via J^T
+
+    @staticmethod
+    def _quat_xyzw_to_rotmat(q_xyzw: torch.Tensor) -> torch.Tensor:
+        """Convert quaternion(s) in (x, y, z, w) to rotation matrix.
+
+        Assumes quaternion maps a vector from local frame to world/base frame:
+          v_world = R(q) * v_local
+        """
+        # q shape: (..., 4)
+        x, y, z, w = q_xyzw.unbind(dim=-1)
+
+        # Normalize to avoid drift (important if upstream produces non-unit quats).
+        inv_norm = torch.rsqrt((x * x + y * y + z * z + w * w).clamp_min(1e-12))
+        x = x * inv_norm
+        y = y * inv_norm
+        z = z * inv_norm
+        w = w * inv_norm
+
+        xx = x * x
+        yy = y * y
+        zz = z * z
+        xy = x * y
+        xz = x * z
+        yz = y * z
+        wx = w * x
+        wy = w * y
+        wz = w * z
+
+        # Row-major rotation matrix.
+        m00 = 1.0 - 2.0 * (yy + zz)
+        m01 = 2.0 * (xy - wz)
+        m02 = 2.0 * (xz + wy)
+
+        m10 = 2.0 * (xy + wz)
+        m11 = 1.0 - 2.0 * (xx + zz)
+        m12 = 2.0 * (yz - wx)
+
+        m20 = 2.0 * (xz - wy)
+        m21 = 2.0 * (yz + wx)
+        m22 = 1.0 - 2.0 * (xx + yy)
+
+        return torch.stack(
+            (
+                torch.stack((m00, m01, m02), dim=-1),
+                torch.stack((m10, m11, m12), dim=-1),
+                torch.stack((m20, m21, m22), dim=-1),
+            ),
+            dim=-2,
+        )
     
     def add_palm_pose_attractor(self):
         """
@@ -507,12 +557,32 @@ class CS63TesolloFabric(BaseFabric):
             gripper_params = self.fabric_params.get("gripper_force", {})
             self._force_scale = gripper_params.get("fingertip_force_scale", 1.0)
         
-            # Process forces: clamp to [-1, 1] and scale
+            # Process forces: clamp to [-1, 1] and convert from tip-local frame to base/world frame.
+            #
+            # IMPORTANT:
+            # - The fingertip taskmap is defined over 3D point positions in base/world coordinates.
+            # - Therefore, external_force must be expressed in the SAME coordinate frame.
+            # - Policy outputs forces in each tip*_force_frame local coordinates -> rotate into base/world.
+            #
             # finger_forces shape: (b x num_fingers x 3)
-            forces_clamped = torch.clamp(self._finger_forces, min=-1.0, max=1.0)
-            
+            forces_tip = torch.clamp(self._finger_forces, min=-1.0, max=1.0)
+
+            # Compute tip frame rotations w.r.t. gripper base/world from FK transforms.
+            # Use the same gripper-only kinematics used by the fingertip taskmap.
+            fingertips_taskmap = self.get_taskmap("fingertips")
+            q_gripper = batched_cspace_position[:, -self.num_gripper_joints:]
+            link_transforms, _ = RobotKinematics.apply(q_gripper, fingertips_taskmap.robot_kinematics)
+            # wp.transform -> torch layout: [px, py, pz, qx, qy, qz, qw]
+            tip_quats_xyzw = link_transforms[:, fingertips_taskmap.link_indices, 3:7]
+            tip_R_base = self._quat_xyzw_to_rotmat(tip_quats_xyzw)  # (b, num_fingers, 3, 3)
+
+            # Rotate forces into base/world:
+            # f_base = R_base_tip * f_tip
+            forces_base = torch.einsum("bfij,bfj->bfi", tip_R_base, forces_tip)
+
             # Flatten to fingertip space: (b x num_fingers x 3) -> (b x 9)
-            forces_flat = forces_clamped.reshape(self.batch_size, -1)
+            forces_flat = forces_base.reshape(self.batch_size, -1)
+
             
             # Scale by γ
             forces_scaled = self._force_scale * forces_flat
