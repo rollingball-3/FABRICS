@@ -29,7 +29,7 @@ class JointSpeedLimitRepulsion(BaseFabricTerm):
         super().__init__(is_forcing_policy, params, device)
 
         self.joint_speed_limit =\
-                torch.tensor(self.params['velocity_limits'], device=self.device)
+                torch.as_tensor(self.params['velocity_limits'], device=self.device, dtype=torch.float32)
         self._kEpsilon = 1e-6
 
     def metric_eval(self, x, xd, features):

@@ -29,15 +29,15 @@ class JointLimitRepulsion(BaseFabricTerm):
         super().__init__(is_forcing_policy, params, device, graph_capturable=graph_capturable)
 
         self._kEpsilon = 1e-6
-        self.params['metric_scalar'] = torch.tensor(self.params['metric_scalar'], device=device)
-        self.params['max_metric'] = torch.tensor(self.params['max_metric'], device=device)
+        self.params['metric_scalar'] = torch.as_tensor(self.params['metric_scalar'], device=device, dtype=torch.float32)
+        self.params['max_metric'] = torch.as_tensor(self.params['max_metric'], device=device, dtype=torch.float32)
         self._min_x_delta = self.compute_min_x_delta()
 
         self.ones_like_x = None
 
     def compute_min_x_delta(self):
-        return torch.tensor((self.params['metric_scalar'] / self.params['max_metric'])**0.5,
-                            device=self.device)
+        val = (self.params['metric_scalar'] / self.params['max_metric'])**0.5
+        return torch.as_tensor(val, device=self.device, dtype=torch.float32)
 
     def metric_eval(self, x, xd, features):
         """
