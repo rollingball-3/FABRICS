@@ -10,6 +10,7 @@ from .attractor_variant import (
     CS63TesolloGripperLatentAttractorFabric,
     CS63TesolloGripperJointAttractorFabric
 )
+from .fingertip_attractor_variant import CS63TesolloFingertipAttractorFabric
 
 # Compatibility aliases
-CS63TesolloFabric = CS63TesolloForceFabric
+CS63TesolloFabric = CS63TesolloFingertipAttractorFabric
