@@ -1,0 +1,131 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# CS63 Tesollo tracked-points attractor params.
+# Keep cs63_tesollo_params.yaml as the default baseline and put point-tracking variants here.
+#
+
+fabric_params:
+    # Enable/disable flags for fabric components
+    active_flags:
+        cspace_attractor: True
+        joint_limit_repulsion: True
+        gripper_force: False
+        tracked_points_attractor: True
+        palm_attractor: True
+        body_repulsion: False
+        cspace_energy: True
+
+    cspace_attractor:
+        min_isotropic_mass: 1.0
+        max_isotropic_mass: 1.0
+        mass_sharpness: 20.0
+        mass_switch_offset: 1.
+        conical_sharpness: 20.
+        conical_gain: 1.
+
+    joint_limit_repulsion:
+        velocity_gate: True
+        breakaway_distance: 0.0
+        breakaway_velocity: 0.
+        soft_relu_gain: 8.
+        metric_scalar: 0.02
+        metric_exploder_offset: 0.1
+        max_metric: 100.
+        damping_gain: 8.
+
+    # Point attractor (generic): tracked frames relative to palm_link.
+    # NOTE: All frame names must exist in the gripper URDF (DG3F).
+    tracked_points_attractor:
+        # Default (fingertips):
+        tracking_frames: ["tip1_force_frame", "tip2_force_frame", "tip3_force_frame"]
+        #
+        # Alternative 6-point configuration (one point on the upper two phalanges per finger):
+        # tracking_frames: ["F1_01", "F1_02", "F2_01", "F2_02", "F3_01", "F3_02"]
+        #
+        min_isotropic_mass: 5.0
+        max_isotropic_mass: 5.0
+        mass_sharpness: 10.0
+        mass_switch_offset: 0.5
+        conical_sharpness: 40.0
+        conical_gain: 50.0
+        damping: 50.0
+        damping_sharpness: 10.0
+        damping_radius: 0.05
+
+    palm_attractor:
+        min_isotropic_mass: 5.0
+        max_isotropic_mass: 5.0
+        mass_sharpness: 10
+        mass_switch_offset: 0.5
+        conical_sharpness: 40.0
+        conical_gain: 50.0
+        damping: 50.0
+        damping_sharpness: 10.
+        damping_radius: .05
+
+    body_repulsion:
+      max_depth: 2.
+      min_depth: 0.01
+      engage_depth: 0.5
+      breakaway_depth: 0.0
+      breakaway_velocity: 0.
+      metric_scalar: 1.
+      velocity_gate: True
+      velocity_gate_sharpness: 1000.
+      velocity_gate_offset: 0.002
+      rescaled_min_dist: .01
+      forcing_metric_scalar: .01
+      geom_metric_scalar: .01
+      constant_accel: 1.
+      constant_accel_geom: 5.
+      damping_gain: 0.
+
+      collision_sphere_frames:
+          ["shoulder_link", "upperarm_link", "forearm_link",
+           "wrist_1_link", "wrist_2_link", "wrist_3_link",
+           "F1_01", "F1_02", "F1_03", "F1_04",
+           "F2_01", "F2_02", "F2_03", "F2_04",
+           "F3_01", "F3_02", "F3_03", "F3_04"]
+
+      collision_sphere_radii: [
+          0.08, 0.10, 0.08,
+          0.05, 0.05, 0.04,
+          0.015, 0.012, 0.012, 0.010,
+          0.015, 0.012, 0.012, 0.010,
+          0.015, 0.012, 0.012, 0.010
+      ]
+
+      collision_sphere_pairs: []
+
+      collision_link_prefix_pairs: [
+          ["F1_", "upperarm"],
+          ["F1_", "forearm"],
+          ["F2_", "upperarm"],
+          ["F2_", "forearm"],
+          ["F3_", "upperarm"],
+          ["F3_", "forearm"]
+      ]
+
+    cspace_damping:
+      gain: 5.
+
+    speed_control:
+      active: False
+      energy_target: 10.
+      damping: 100.
+
+    joint_limits:
+      active: True
+      acceleration: [
+          7.5, 7.5, 10., 10., 10., 20.,
+          22.5, 22.5, 22.5, 22.5,
+          22.5, 22.5, 22.5, 22.5,
+          22.5, 22.5, 22.5, 22.5
+      ]
+      jerk: [
+          3750., 3750., 5000., 5000., 5000., 10000.,
+          2250., 2250., 2250., 2250.,
+          2250., 2250., 2250., 2250.,
+          2250., 2250., 2250., 2250.
+      ]
+

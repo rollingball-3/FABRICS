@@ -10,7 +10,6 @@ fabric_params:
         cspace_attractor: True
         joint_limit_repulsion: True
         gripper_force: True
-        fingertip_attractor: True
         palm_attractor: True
         #TODO 碰撞的配置需要进一步考究，目前已经将urdf转换为cs63_tesollo_spherized.urdf
         body_repulsion: False
@@ -36,17 +35,6 @@ fabric_params:
     # Force-based gripper control
     gripper_force:
         fingertip_force_scale: 100
-    
-    fingertip_attractor:
-        min_isotropic_mass: 5.0
-        max_isotropic_mass: 5.0
-        mass_sharpness: 10.0
-        mass_switch_offset: 0.5
-        conical_sharpness: 40.0
-        conical_gain: 50.0
-        damping: 50.0
-        damping_sharpness: 10.0
-        damping_radius: 0.05
     
     palm_attractor:
         min_isotropic_mass: 5.0
