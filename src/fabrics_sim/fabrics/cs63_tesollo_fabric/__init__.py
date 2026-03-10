@@ -5,5 +5,7 @@
 # 'cs63_tesollo_fabric.py' file while providing a modular internal structure.
 
 from .force_variant import CS63TesolloForceFabric
+from .force_dpcs_variant import CS63TesolloForceDPCSFabric
+from .admittance_variant import CS63TesolloAdmittanceFabric
 from .joint_attractor_variant import CS63TesolloGripperLatentAttractorFabric, CS63TesolloGripperJointAttractorFabric
 from .point_attractor_variant import CS63TesolloHand3DPointsAttractorFabric
