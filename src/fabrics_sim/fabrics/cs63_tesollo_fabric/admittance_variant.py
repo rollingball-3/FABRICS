@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import torch
 
-from .fingertip_attractor_variant import CS63TesolloFingertipAttractorFabric
+from .point_attractor_variant import CS63TesolloHand3DPointsAttractorFabric
 
 
-class CS63TesolloAdmittanceFabric(CS63TesolloFingertipAttractorFabric):
+class CS63TesolloAdmittanceFabric(CS63TesolloHand3DPointsAttractorFabric):
     """Fingertip-attractor fabric with Forced Admittance term.
 
     Scheme A:
@@ -123,7 +123,7 @@ class CS63TesolloAdmittanceFabric(CS63TesolloFingertipAttractorFabric):
             )
 
         super().set_features(
-            fingertip_targets=fingertip_targets,
+            point_targets=fingertip_targets,
             palm_position=palm_position,
             palm_matrix=palm_matrix,
             batched_cspace_position=batched_cspace_position,
